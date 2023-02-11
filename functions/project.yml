@@ -1,0 +1,16 @@
+---
+parameters: {}
+environment: {}
+packages:
+  - name: discord
+    environment: {}
+    parameters: {}
+    actions:
+      - name: interaction 
+        main: 'HandleInteraction'
+        runtime: 'go:default'
+        web: raw
+        environment:
+          DISCORD_TOKEN: "${DISCORD_TOKEN}"
+          DISCORD_APP_PUBLIC_KEY: "${DISCORD_APP_PUBLIC_KEY}"
+        parameters: {}
