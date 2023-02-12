@@ -31,9 +31,8 @@ type RandomQuestionVariables struct {
 // RandomQuestionFilters are filters that can be set on the request to the
 // randomQuestion GraphQL API.
 type RandomQuestionFilters struct {
-	Difficulty  Difficulty `json:"difficulty"`
-	PremiumOnly bool       `json:"premiumOnly"`
-	Tags        []string   `json:"tags"`
+	Difficulty Difficulty `json:"difficulty"`
+	Tags       []string   `json:"tags,omitempty"`
 }
 
 // RandomQuestionResponse is the response sent back from the randomQuestion
@@ -46,6 +45,7 @@ type RandomQuestionResponse struct {
 	} `json:"data"`
 }
 
+// RandomQuestion retrieves a random LeetCode problem.
 func (l Client) RandomQuestion(difficulty Difficulty) (RandomQuestionResponse, error) {
 	requestBody := RandomQuestionRequest{
 		Query: RandomQuestionQuery,
@@ -69,7 +69,7 @@ func (l Client) RandomQuestion(difficulty Difficulty) (RandomQuestionResponse, e
 	req.Header.Set("Origin", "https://leetcode.com")
 	req.Header.Set("Referer", "https://leetcode.com")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := l.httpClient.Do(req)
 	if err != nil {
 		return RandomQuestionResponse{}, err
 	}

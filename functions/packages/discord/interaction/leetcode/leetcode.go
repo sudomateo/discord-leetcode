@@ -2,8 +2,23 @@ package leetcode
 
 import (
 	"math/rand"
+	"net/http"
 	"time"
 )
+
+// The LeetCode API client.
+type Client struct {
+	httpClient *http.Client
+}
+
+// NewClient builds and returns a LeetCode API client ready for use.
+func NewClient() Client {
+	return Client{
+		httpClient: &http.Client{
+			Timeout: 15 * time.Second,
+		},
+	}
+}
 
 // Difficulty represents the difficulty of LeetCode questions.
 type Difficulty string
@@ -15,8 +30,8 @@ const (
 	DifficultyHard   Difficulty = "HARD"
 )
 
-type Client struct{}
 
+// RandomDifficulty computes a random LeetCode problem difficulty.
 func RandomDifficulty() Difficulty {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 

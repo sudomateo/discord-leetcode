@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,14 +25,22 @@ type Response struct {
 	Body       interface{}       `json:"body,omitempty"`
 }
 
+// ErrorResponse is the response we send to clients when an error occurs.
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+// PingResponse is the response sent to acknowledge a Discord ping.
 type PingResponse struct {
 	Type discordgo.InteractionType `json:"type"`
 }
 
+// InteractionData is the data we expect from the client.
+type InteractionData struct {
+	Data discordgo.ApplicationCommandInteractionData `json:"data"`
+}
+
+// HandleInteraction is the main entrypoint for this DigitalOcean function.
 func HandleInteraction(args map[string]interface{}) *Response {
 	log := hclog.New(&hclog.LoggerOptions{
 		Name: "discord-leetcode",
@@ -38,150 +48,109 @@ func HandleInteraction(args map[string]interface{}) *Response {
 
 	defer func() {
 		if v := recover(); v != nil {
-			log.Error("PANIC", "value", v)
+			log.Error("panic", "value", v)
 		}
 	}()
 
 	log.Info("request received")
 	defer log.Info("request complete")
 
-	r := requestFromArgs(args)
+	r := parseRequest(args)
 
-	publicKey := os.Getenv("DISCORD_APP_PUBLIC_KEY")
-	if publicKey == "" {
-		log.Error("missing discord application public key")
-		return &Response{
-			StatusCode: http.StatusInternalServerError,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusInternalServerError),
-			},
-		}
+	if err := verifyRequestSignature(r); err != nil {
+		log.Error("request verification failed", "error", err)
+		return respondError(http.StatusUnauthorized)
 	}
 
-	publicKeyBytes, err := hex.DecodeString(publicKey)
-	if err != nil {
-		log.Error("could not decode public key", "error", err)
-		return &Response{
-			StatusCode: http.StatusInternalServerError,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusInternalServerError),
-			},
-		}
+	buf := new(bytes.Buffer)
+	if _, err := io.Copy(buf, r.Body); err != nil {
+		log.Error("could not read request body", "error", err)
+		return respondError(http.StatusInternalServerError)
 	}
-
-	if !discordgo.VerifyInteraction(r, ed25519.PublicKey(publicKeyBytes)) {
-		log.Error("interaction failed verification")
-		return &Response{
-			StatusCode: http.StatusBadRequest,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusBadRequest),
-			},
-		}
-	}
+	body := bytes.NewReader(buf.Bytes())
 
 	var interaction discordgo.Interaction
-	if err := json.NewDecoder(r.Body).Decode(&interaction); err != nil {
-		log.Error("invalid interation payload", "error", err)
-		return &Response{
-			StatusCode: http.StatusBadRequest,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusBadRequest),
-			},
-		}
+	if err := json.NewDecoder(body).Decode(&interaction); err != nil {
+		log.Error("invalid interaction payload", "error", err)
+		return respondError(http.StatusBadRequest)
 	}
 
+	// It's a ping request. Acknowledge it and respond with a pong.
 	if interaction.Type == discordgo.InteractionType(discordgo.InteractionResponsePong) {
 		log.Info("acknowledging interaction", "type", interaction.Type)
-		return &Response{
-			StatusCode: http.StatusOK,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: PingResponse{
-				Type: discordgo.InteractionType(discordgo.InteractionResponsePong),
-			},
-		}
+		return respond(http.StatusOK, PingResponse{
+			Type: discordgo.InteractionType(discordgo.InteractionResponsePong),
+		})
+	}
+
+	// We only support interactions of type application command.
+	if interaction.Data.Type() != discordgo.InteractionType(discordgo.InteractionApplicationCommand) {
+		log.Error("unsupported request type", "type", interaction.Data.Type().String())
+		return respondError(http.StatusBadRequest)
 	}
 
 	token := os.Getenv("DISCORD_TOKEN")
 	if token == "" {
 		log.Error("missing discord token")
-		return &Response{
-			StatusCode: http.StatusInternalServerError,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusInternalServerError),
-			},
-		}
+		return respondError(http.StatusInternalServerError)
 	}
 
 	d, err := discordgo.New("Bot " + token)
 	if err != nil {
 		log.Error("could not create discord client", "error", err)
-		return &Response{
-			StatusCode: http.StatusInternalServerError,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusInternalServerError),
-			},
-		}
+		return respondError(http.StatusInternalServerError)
 	}
 
-	lc := leetcode.Client{}
-	resp, err := lc.RandomQuestion(leetcode.RandomDifficulty())
+	// Seek back to the beginning of the request body so we can parse it into
+	// the correct interaction type.
+	if _, err := body.Seek(io.SeekStart, io.SeekStart); err != nil {
+		log.Error("could not seek body", "error", err)
+		return respondError(http.StatusInternalServerError)
+	}
+
+	var interactionData InteractionData
+	if err := json.NewDecoder(body).Decode(&interactionData); err != nil {
+		log.Error("invalid interation payload", "error", err, "type", interaction.Data.Type().String())
+		return respondError(http.StatusBadRequest)
+	}
+
+	lcResp, err := fetchLeetCodeProblem(interactionData)
 	if err != nil {
-		log.Error("could not retrieve leetcode question", "error", err)
-		return &Response{
-			StatusCode: http.StatusInternalServerError,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusInternalServerError),
-			},
-		}
+		log.Error("could not fetch leetcode problem", "error", err)
+		return respondError(http.StatusInternalServerError)
 	}
 
 	interactionResp := discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("https://leetcode.com/problems/%s", resp.Data.RandomQuestion.TitleSlug),
+			Content: fmt.Sprintf("https://leetcode.com/problems/%s", lcResp.Data.RandomQuestion.TitleSlug),
 		},
 	}
 
+	log.Info("responding to interaction",
+		"type", interaction.Data.Type().String(),
+		"id", interactionData.Data.ID,
+		"name", interactionData.Data.Name,
+		"target_id", interactionData.Data.TargetID,
+	)
+
 	if err := d.InteractionRespond(&interaction, &interactionResp); err != nil {
-		log.Error("could not response to interaction", "error", err, "type", interaction.Type)
-		return &Response{
-			StatusCode: http.StatusInternalServerError,
-			Headers: map[string]string{
-				"Content-Type": "application/json",
-			},
-			Body: ErrorResponse{
-				Error: http.StatusText(http.StatusInternalServerError),
-			},
-		}
+		log.Error("failed responding to interaction",
+			"error", err,
+			"type", interaction.Data.Type().String(),
+			"id", interactionData.Data.ID,
+			"name", interactionData.Data.Name,
+			"target_id", interactionData.Data.TargetID,
+		)
+		return respondError(http.StatusInternalServerError)
 	}
 
 	return nil
 }
 
-func requestFromArgs(args map[string]interface{}) *http.Request {
+// parseRequest parses the  request arguments into the Go representation of an
+// HTTP request.
+func parseRequest(args map[string]interface{}) *http.Request {
 	r := http.Request{
 		Header: make(http.Header),
 	}
@@ -198,10 +167,76 @@ func requestFromArgs(args map[string]interface{}) *http.Request {
 
 	if http, ok := args["http"].(map[string]interface{}); ok {
 		if body, ok := http["body"].(string); ok {
-			reader := strings.NewReader(body)
-			r.Body = io.NopCloser(reader)
+			r.Body = io.NopCloser(strings.NewReader(body))
 		}
 	}
 
 	return &r
+}
+
+// verifyRequestSignature verifies whether or not the request signature is a
+// valid Discord request.
+func verifyRequestSignature(r *http.Request) error {
+	publicKey := os.Getenv("DISCORD_APP_PUBLIC_KEY")
+	if publicKey == "" {
+		return errors.New("missing discord application public key")
+	}
+
+	publicKeyBytes, err := hex.DecodeString(publicKey)
+	if err != nil {
+		return fmt.Errorf("invalid discord application public key: %w", err)
+	}
+
+	if !discordgo.VerifyInteraction(r, ed25519.PublicKey(publicKeyBytes)) {
+		return errors.New("invalid request signature")
+	}
+
+	return nil
+}
+
+// fetchLeetCodeProblem retrieves a random LeetCode problem based on the
+// interaction data.
+func fetchLeetCodeProblem(interactionData InteractionData) (leetcode.RandomQuestionResponse, error) {
+	var optDifficulty string
+
+	for _, v := range interactionData.Data.Options {
+		if v.Name == "difficulty" {
+			optDifficulty = v.StringValue()
+			break
+		}
+	}
+
+	var difficulty leetcode.Difficulty
+
+	switch leetcode.Difficulty(strings.ToUpper(optDifficulty)) {
+	case leetcode.DifficultyEasy:
+		difficulty = leetcode.DifficultyEasy
+	case leetcode.DifficultyMedium:
+		difficulty = leetcode.DifficultyMedium
+	case leetcode.DifficultyHard:
+		difficulty = leetcode.DifficultyHard
+	default:
+		difficulty = leetcode.RandomDifficulty()
+	}
+
+	lc := leetcode.NewClient()
+	return lc.RandomQuestion(difficulty)
+}
+
+// respondError crafts an error response.
+func respondError(statusCode int) *Response {
+	return respond(statusCode, ErrorResponse{
+		Error: http.StatusText(statusCode),
+	})
+}
+
+// respond crafts a generic response.
+func respond(statusCode int, body interface{}) *Response {
+	return &Response{
+		StatusCode: statusCode,
+		Headers: map[string]string{
+			"Content-Type": "application/json",
+		},
+		Body: body,
+	}
 }
