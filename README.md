@@ -6,5 +6,6 @@
   </a>
 </p>
 
-A Discord application to retrieve a random LeetCode question using the
-`/leetcode` command.
+A Discord application to retrieve a random LeetCode question.
+
+Add this application to your Discord server to create the `/leetcode` command.
