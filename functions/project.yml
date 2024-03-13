@@ -3,12 +3,12 @@ parameters: {}
 environment: {}
 packages:
   - name: discord
-    environment: {}
     parameters: {}
-    actions:
+    environment: {}
+    functions:
       - name: interaction 
-        main: 'HandleInteraction'
-        runtime: 'go:default'
+        main: 'Main'
+        runtime: 'go:1.20'
         web: raw
         environment:
           DISCORD_TOKEN: "${DISCORD_TOKEN}"

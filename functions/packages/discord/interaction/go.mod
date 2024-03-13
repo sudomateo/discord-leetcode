@@ -1,6 +1,6 @@
 module github.com/sudomateo/discord-leetcode/functions/packages/discord/interaction
 
-go 1.17
+go 1.20
 
 require (
 	github.com/bwmarrin/discordgo v0.27.0

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -17,12 +18,23 @@ import (
 	"github.com/sudomateo/discord-leetcode/functions/packages/discord/interaction/leetcode"
 )
 
+type Event struct {
+	HTTP struct {
+		Body            string            `json:"body"`
+		Headers         map[string]string `json:"headers"`
+		IsBase64Encoded bool              `json:"isBase64Encoded"`
+		Method          string            `json:"method"`
+		Path            string            `json:"path"`
+		QueryString     string            `json:"queryString"`
+	} `json:"http"`
+}
+
 // Response is the response the DigitalOcean functions expects in order to send
 // responses to clients.
 type Response struct {
+	Body       any               `json:"body,omitempty"`
 	StatusCode int               `json:"statusCode,omitempty"`
 	Headers    map[string]string `json:"headers,omitempty"`
-	Body       interface{}       `json:"body,omitempty"`
 }
 
 // ErrorResponse is the response we send to clients when an error occurs.
@@ -40,8 +52,8 @@ type InteractionData struct {
 	Data discordgo.ApplicationCommandInteractionData `json:"data"`
 }
 
-// HandleInteraction is the main entrypoint for this DigitalOcean function.
-func HandleInteraction(args map[string]interface{}) *Response {
+// Main is the main entrypoint for this DigitalOcean function.
+func Main(ctx context.Context, event Event) Response {
 	log := hclog.New(&hclog.LoggerOptions{
 		Name: "discord-leetcode",
 	})
@@ -55,7 +67,14 @@ func HandleInteraction(args map[string]interface{}) *Response {
 	log.Info("request received")
 	defer log.Info("request complete")
 
-	r := parseRequest(args)
+	r, err := http.NewRequest(event.HTTP.Method, "", io.NopCloser(strings.NewReader(event.HTTP.Body)))
+	if err != nil {
+		log.Error("new request failed", "error", err)
+		return respondError(http.StatusInternalServerError)
+	}
+	for key, val := range event.HTTP.Headers {
+		r.Header.Set(key, val)
+	}
 
 	if err := verifyRequestSignature(r); err != nil {
 		log.Error("request verification failed", "error", err)
@@ -145,33 +164,7 @@ func HandleInteraction(args map[string]interface{}) *Response {
 		return respondError(http.StatusInternalServerError)
 	}
 
-	return nil
-}
-
-// parseRequest parses the  request arguments into the Go representation of an
-// HTTP request.
-func parseRequest(args map[string]interface{}) *http.Request {
-	r := http.Request{
-		Header: make(http.Header),
-	}
-
-	if http, ok := args["http"].(map[string]interface{}); ok {
-		if headerMap, ok := http["headers"].(map[string]interface{}); ok {
-			for header, valueMap := range headerMap {
-				if value, ok := valueMap.(string); ok {
-					r.Header.Set(header, value)
-				}
-			}
-		}
-	}
-
-	if http, ok := args["http"].(map[string]interface{}); ok {
-		if body, ok := http["body"].(string); ok {
-			r.Body = io.NopCloser(strings.NewReader(body))
-		}
-	}
-
-	return &r
+	return Response{}
 }
 
 // verifyRequestSignature verifies whether or not the request signature is a
@@ -224,15 +217,15 @@ func fetchLeetCodeProblem(interactionData InteractionData) (leetcode.RandomQuest
 }
 
 // respondError crafts an error response.
-func respondError(statusCode int) *Response {
+func respondError(statusCode int) Response {
 	return respond(statusCode, ErrorResponse{
 		Error: http.StatusText(statusCode),
 	})
 }
 
 // respond crafts a generic response.
-func respond(statusCode int, body interface{}) *Response {
-	return &Response{
+func respond(statusCode int, body any) Response {
+	return Response{
 		StatusCode: statusCode,
 		Headers: map[string]string{
 			"Content-Type": "application/json",
